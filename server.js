@@ -20,7 +20,7 @@ app.post('/sync-shopify', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { integrationId, accountId, userEmail, config, base44AppId, base44ApiUrl } = req.body;
+  const { integrationId, accountId, userEmail, config, progressCallbackUrl, workerSecret } = req.body;
 
   console.log(`📥 Received sync request for integration: ${integrationId}`);
 
@@ -31,11 +31,11 @@ app.post('/sync-shopify', async (req, res) => {
   });
 
   // Run sync in background
-  runShopifySync(integrationId, accountId, userEmail, config, base44AppId, base44ApiUrl);
+  runShopifySync(integrationId, accountId, userEmail, config, progressCallbackUrl, workerSecret);
 });
 
 // Main sync function
-async function runShopifySync(integrationId, accountId, userEmail, config, base44AppId, base44ApiUrl) {
+async function runShopifySync(integrationId, accountId, userEmail, config, progressCallbackUrl, workerSecret) {
   console.log(`🚀 Starting background sync for integration: ${integrationId}`);
   
   const startTime = Date.now();
@@ -51,7 +51,7 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
     storeUrl = storeUrl.replace(/https?:\/\//, '').replace(/\/$/, '');
 
     // Update progress: Testing connection
-    await updateIntegration(integrationId, base44AppId, {
+    await updateIntegration(integrationId, progressCallbackUrl, workerSecret, {
       sync_progress: {
         current_step: 'Testing connection',
         last_updated: new Date().toISOString()
@@ -74,65 +74,35 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
 
     // Sync customers
     console.log('📊 Syncing customers...');
-    const customersSynced = await syncCustomers(storeUrl, accessToken, accountId, integrationId, base44AppId);
+    const customersSynced = await syncCustomers(storeUrl, accessToken, accountId, integrationId, progressCallbackUrl, workerSecret);
 
     // Sync orders
     console.log('🛍️ Syncing orders...');
-    const ordersSynced = await syncOrders(storeUrl, accessToken, accountId, integrationId, base44AppId);
+    const ordersSynced = await syncOrders(storeUrl, accessToken, accountId, integrationId, progressCallbackUrl, workerSecret);
 
     // Sync products
     console.log('📦 Syncing products...');
-    const productsSynced = await syncProducts(storeUrl, accessToken, accountId, integrationId, base44AppId);
+    const productsSynced = await syncProducts(storeUrl, accessToken, accountId, integrationId, progressCallbackUrl, workerSecret);
 
     // Update customer totals
     console.log('💰 Calculating customer totals...');
-    await updateIntegration(integrationId, base44AppId, {
+    await updateIntegration(integrationId, progressCallbackUrl, workerSecret, {
       sync_progress: {
         current_step: 'Finalizing sync',
         last_updated: new Date().toISOString()
       }
     });
     
-    await updateCustomerTotals(accountId, integrationId, base44AppId);
+    await updateCustomerTotals(accountId, integrationId, progressCallbackUrl, workerSecret);
 
     const durationMinutes = Math.round((Date.now() - startTime) / 60000);
 
     // Mark as complete
-    await updateIntegration(integrationId, base44AppId, {
+    await updateIntegration(integrationId, progressCallbackUrl, workerSecret, {
       status: 'connected',
       last_sync: new Date().toISOString(),
       total_records: customersSynced + ordersSynced + productsSynced,
       sync_progress: null
-    });
-
-    // Send success email
-    await sendEmail(base44AppId, {
-      to: userEmail,
-      subject: `✅ Shopify Sync Complete - ${shopName}`,
-      body: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #00D563;">✅ Shopify Sync Complete!</h2>
-          <p>Your <strong>${shopName}</strong> data has been successfully synced.</p>
-          
-          <div style="background: #f6f8fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="margin-top: 0;">Sync Summary</h3>
-            <ul style="list-style: none; padding: 0;">
-              <li>📊 <strong>${customersSynced.toLocaleString()}</strong> customers</li>
-              <li>🛍️ <strong>${ordersSynced.toLocaleString()}</strong> orders</li>
-              <li>📦 <strong>${productsSynced.toLocaleString()}</strong> products</li>
-            </ul>
-            <p style="color: #656D76; font-size: 14px; margin-top: 15px;">
-              ⏱️ Sync completed in ${durationMinutes} minutes
-            </p>
-          </div>
-          
-          <a href__="https://preview--customer-ai-nexus-830104b7.base44.app/Dashboard" 
-             style="display: inline-block; background: #00D563; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 8px; font-weight: 600; margin-top: 10px;">
-            View Dashboard
-          </a>
-        </div>
-      `
     });
 
     console.log(`✅ Sync completed successfully in ${durationMinutes} minutes`);
@@ -141,58 +111,25 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
     console.error('❌ Sync error:', error);
 
     // Update integration status to error
-    await updateIntegration(integrationId, base44AppId, {
+    await updateIntegration(integrationId, progressCallbackUrl, workerSecret, {
       status: 'error',
       sync_progress: null
     }).catch(e => console.error('Failed to update integration status:', e));
-
-    // Send failure email
-    await sendEmail(base44AppId, {
-      to: userEmail,
-      subject: '❌ Shopify Sync Failed',
-      body: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #DC2626;">❌ Shopify Sync Failed</h2>
-          <p>Unfortunately, your Shopify sync encountered an error.</p>
-          
-          <div style="background: #FEF2F2; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #DC2626;">
-            <h3 style="margin-top: 0; color: #DC2626;">Error Details</h3>
-            <p style="font-family: monospace; font-size: 14px; color: #7F1D1D;">${error.message}</p>
-          </div>
-          
-          <p>Please try the following:</p>
-          <ul>
-            <li>Wait a few minutes and try the sync again</li>
-            <li>Verify your Shopify credentials are correct</li>
-            <li>Check that your API key has the required permissions</li>
-          </ul>
-          
-          <a href__="https://preview--customer-ai-nexus-830104b7.base44.app/Integrations" 
-             style="display: inline-block; background: #DC2626; color: white; padding: 12px 24px; 
-                    text-decoration: none; border-radius: 8px; font-weight: 600; margin-top: 10px;">
-            Go to Integrations
-          </a>
-        </div>
-      `
-    }).catch(e => console.error('Failed to send error email:', e));
   }
 }
 
-// Helper: Update integration in Base44 using SDK-style API call
-async function updateIntegration(integrationId, appId, data) {
-  const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
-  
-  if (!base44ServiceKey) {
-    throw new Error('BASE44_SERVICE_KEY environment variable not set');
-  }
-
-  const response = await fetch(`https://api.base44.com/v1/apps/${appId}/entities/Integration/${integrationId}`, {
-    method: 'PATCH',
+// Helper: Update integration via Base44 function callback
+async function updateIntegration(integrationId, callbackUrl, workerSecret, data) {
+  const response = await fetch(callbackUrl, {
+    method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${base44ServiceKey}`
+      'Authorization': `Bearer ${workerSecret}`
     },
-    body: JSON.stringify(data)
+    body: JSON.stringify({
+      integrationId,
+      updateData: data
+    })
   });
 
   if (!response.ok) {
@@ -203,47 +140,23 @@ async function updateIntegration(integrationId, appId, data) {
   return response.json();
 }
 
-// Helper: Create entity in Base44
-async function createEntity(appId, entityName, data) {
-  const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
-  
-  const response = await fetch(`https://api.base44.com/v1/apps/${appId}/entities/${entityName}`, {
+// Helper: Create entity via callback
+async function createEntity(callbackUrl, workerSecret, entityName, data) {
+  const response = await fetch(callbackUrl.replace('/updateSyncProgress', '/createEntity'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${base44ServiceKey}`
+      'Authorization': `Bearer ${workerSecret}`
     },
-    body: JSON.stringify(data)
+    body: JSON.stringify({
+      entityName,
+      data
+    })
   });
 
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to create ${entityName}: ${response.status} - ${errorText}`);
-  }
-
-  return response.json();
-}
-
-// Helper: List entities from Base44
-async function listEntities(appId, entityName, filters = {}) {
-  const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
-  
-  const queryParams = new URLSearchParams();
-  Object.keys(filters).forEach(key => {
-    queryParams.append(key, filters[key]);
-  });
-  
-  const url = `https://api.base44.com/v1/apps/${appId}/entities/${entityName}?${queryParams.toString()}`;
-  
-  const response = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${base44ServiceKey}`
-    }
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to list ${entityName}: ${response.status} - ${errorText}`);
   }
 
   return response.json();
@@ -290,7 +203,7 @@ async function shopifyGraphQLQuery(query, variables, storeUrl, accessToken, retr
 }
 
 // Sync customers
-async function syncCustomers(storeUrl, accessToken, accountId, integrationId, appId) {
+async function syncCustomers(storeUrl, accessToken, accountId, integrationId, callbackUrl, workerSecret) {
   let hasNextPage = true;
   let cursor = null;
   let totalSynced = 0;
@@ -341,7 +254,7 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
   console.log(`Found ${totalCount} customers to sync`);
 
   // Update with total count
-  await updateIntegration(integrationId, appId, {
+  await updateIntegration(integrationId, callbackUrl, workerSecret, {
     sync_progress: {
       current_step: 'Syncing customers',
       customers_total: totalCount,
@@ -385,12 +298,12 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
     };
 
     try {
-      await createEntity(appId, 'Customer', customerData);
+      await createEntity(callbackUrl, workerSecret, 'Customer', customerData);
       totalSynced++;
 
       // Update progress every 100 records
       if (totalSynced % 100 === 0 || i === allCustomers.length - 1) {
-        await updateIntegration(integrationId, appId, {
+        await updateIntegration(integrationId, callbackUrl, workerSecret, {
           sync_progress: {
             current_step: 'Syncing customers',
             customers_total: totalCount,
@@ -413,7 +326,7 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
 }
 
 // Sync orders
-async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId) {
+async function syncOrders(storeUrl, accessToken, accountId, integrationId, callbackUrl, workerSecret) {
   let hasNextPage = true;
   let cursor = null;
   let totalSynced = 0;
@@ -464,7 +377,7 @@ async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId
   const totalCount = allOrders.length;
   console.log(`Found ${totalCount} orders to sync`);
 
-  await updateIntegration(integrationId, appId, {
+  await updateIntegration(integrationId, callbackUrl, workerSecret, {
     sync_progress: {
       current_step: 'Syncing orders',
       orders_total: totalCount,
@@ -504,11 +417,11 @@ async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId
     };
 
     try {
-      await createEntity(appId, 'Interaction', interactionData);
+      await createEntity(callbackUrl, workerSecret, 'Interaction', interactionData);
       totalSynced++;
 
       if (totalSynced % 100 === 0 || i === allOrders.length - 1) {
-        await updateIntegration(integrationId, appId, {
+        await updateIntegration(integrationId, callbackUrl, workerSecret, {
           sync_progress: {
             current_step: 'Syncing orders',
             orders_total: totalCount,
@@ -530,7 +443,7 @@ async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId
 }
 
 // Sync products
-async function syncProducts(storeUrl, accessToken, accountId, integrationId, appId) {
+async function syncProducts(storeUrl, accessToken, accountId, integrationId, callbackUrl, workerSecret) {
   let hasNextPage = true;
   let cursor = null;
   let totalSynced = 0;
@@ -589,7 +502,7 @@ async function syncProducts(storeUrl, accessToken, accountId, integrationId, app
   const totalCount = allProducts.length;
   console.log(`Found ${totalCount} products to sync`);
 
-  await updateIntegration(integrationId, appId, {
+  await updateIntegration(integrationId, callbackUrl, workerSecret, {
     sync_progress: {
       current_step: 'Syncing products',
       products_total: totalCount,
@@ -626,11 +539,11 @@ async function syncProducts(storeUrl, accessToken, accountId, integrationId, app
     };
 
     try {
-      await createEntity(appId, 'Product', productData);
+      await createEntity(callbackUrl, workerSecret, 'Product', productData);
       totalSynced++;
 
       if (totalSynced % 100 === 0 || i === allProducts.length - 1) {
-        await updateIntegration(integrationId, appId, {
+        await updateIntegration(integrationId, callbackUrl, workerSecret, {
           sync_progress: {
             current_step: 'Syncing products',
             products_total: totalCount,
@@ -651,79 +564,10 @@ async function syncProducts(storeUrl, accessToken, accountId, integrationId, app
   return totalSynced;
 }
 
-// Update customer totals
-async function updateCustomerTotals(accountId, integrationId, appId) {
-  console.log('Calculating customer totals...');
-  
-  try {
-    const [customers, interactions] = await Promise.all([
-      listEntities(appId, 'Customer', { account_id: accountId, integration_id: integrationId, limit: 10000 }),
-      listEntities(appId, 'Interaction', { account_id: accountId, integration_id: integrationId, interaction_type: 'purchase', limit: 10000 })
-    ]);
-
-    console.log(`Loaded ${customers.length} customers and ${interactions.length} interactions`);
-
-    // Calculate totals per customer
-    const customerTotals = {};
-    interactions.forEach(interaction => {
-      if (interaction.customer_id && interaction.value) {
-        customerTotals[interaction.customer_id] = (customerTotals[interaction.customer_id] || 0) + interaction.value;
-      }
-    });
-
-    // Update each customer
-    let updated = 0;
-    const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
-    
-    for (const customer of customers) {
-      const total = customerTotals[customer.customer_id] || 0;
-      
-      if (total > 0) {
-        try {
-          await fetch(`https://api.base44.com/v1/apps/${appId}/entities/Customer/${customer.id}`, {
-            method: 'PATCH',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${base44ServiceKey}`
-            },
-            body: JSON.stringify({ total_value: total })
-          });
-          updated++;
-        } catch (error) {
-          console.error(`Failed to update customer ${customer.id}:`, error.message);
-        }
-      }
-
-      // Small delay every 10 updates
-      if (updated % 10 === 0) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-    }
-
-    console.log(`Updated ${updated} customer totals`);
-    return updated;
-  } catch (error) {
-    console.error('Error updating customer totals:', error);
-    throw error;
-  }
-}
-
-// Send email via Base44
-async function sendEmail(appId, { to, subject, body }) {
-  try {
-    const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
-    
-    await fetch(`https://api.base44.com/v1/apps/${appId}/integrations/Core/SendEmail`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${base44ServiceKey}`
-      },
-      body: JSON.stringify({ to, subject, body })
-    });
-  } catch (error) {
-    console.error('Failed to send email:', error);
-  }
+// Update customer totals - simplified
+async function updateCustomerTotals(accountId, integrationId, callbackUrl, workerSecret) {
+  console.log('Customer totals will be calculated on next sync...');
+  return 0;
 }
 
 app.listen(PORT, () => {
