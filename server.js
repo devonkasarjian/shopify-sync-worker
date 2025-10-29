@@ -51,7 +51,7 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
     storeUrl = storeUrl.replace(/https?:\/\//, '').replace(/\/$/, '');
 
     // Update progress: Testing connection
-    await updateIntegration(integrationId, base44AppId, base44ApiUrl, {
+    await updateIntegration(integrationId, base44AppId, {
       sync_progress: {
         current_step: 'Testing connection',
         last_updated: new Date().toISOString()
@@ -74,31 +74,31 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
 
     // Sync customers
     console.log('📊 Syncing customers...');
-    const customersSynced = await syncCustomers(storeUrl, accessToken, accountId, integrationId, base44AppId, base44ApiUrl);
+    const customersSynced = await syncCustomers(storeUrl, accessToken, accountId, integrationId, base44AppId);
 
     // Sync orders
     console.log('🛍️ Syncing orders...');
-    const ordersSynced = await syncOrders(storeUrl, accessToken, accountId, integrationId, base44AppId, base44ApiUrl);
+    const ordersSynced = await syncOrders(storeUrl, accessToken, accountId, integrationId, base44AppId);
 
     // Sync products
     console.log('📦 Syncing products...');
-    const productsSynced = await syncProducts(storeUrl, accessToken, accountId, integrationId, base44AppId, base44ApiUrl);
+    const productsSynced = await syncProducts(storeUrl, accessToken, accountId, integrationId, base44AppId);
 
     // Update customer totals
     console.log('💰 Calculating customer totals...');
-    await updateIntegration(integrationId, base44AppId, base44ApiUrl, {
+    await updateIntegration(integrationId, base44AppId, {
       sync_progress: {
         current_step: 'Finalizing sync',
         last_updated: new Date().toISOString()
       }
     });
     
-    await updateCustomerTotals(accountId, integrationId, base44AppId, base44ApiUrl);
+    await updateCustomerTotals(accountId, integrationId, base44AppId);
 
     const durationMinutes = Math.round((Date.now() - startTime) / 60000);
 
     // Mark as complete
-    await updateIntegration(integrationId, base44AppId, base44ApiUrl, {
+    await updateIntegration(integrationId, base44AppId, {
       status: 'connected',
       last_sync: new Date().toISOString(),
       total_records: customersSynced + ordersSynced + productsSynced,
@@ -106,7 +106,7 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
     });
 
     // Send success email
-    await sendEmail(base44AppId, base44ApiUrl, {
+    await sendEmail(base44AppId, {
       to: userEmail,
       subject: `✅ Shopify Sync Complete - ${shopName}`,
       body: `
@@ -141,13 +141,13 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
     console.error('❌ Sync error:', error);
 
     // Update integration status to error
-    await updateIntegration(integrationId, base44AppId, base44ApiUrl, {
+    await updateIntegration(integrationId, base44AppId, {
       status: 'error',
       sync_progress: null
     }).catch(e => console.error('Failed to update integration status:', e));
 
     // Send failure email
-    await sendEmail(base44AppId, base44ApiUrl, {
+    await sendEmail(base44AppId, {
       to: userEmail,
       subject: '❌ Shopify Sync Failed',
       body: `
@@ -178,13 +178,19 @@ async function runShopifySync(integrationId, accountId, userEmail, config, base4
   }
 }
 
-// Helper: Update integration in Base44
-async function updateIntegration(integrationId, appId, apiUrl, data) {
-  const response = await fetch(`${apiUrl}/v1/apps/${appId}/entities/Integration/${integrationId}`, {
+// Helper: Update integration in Base44 using SDK-style API call
+async function updateIntegration(integrationId, appId, data) {
+  const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
+  
+  if (!base44ServiceKey) {
+    throw new Error('BASE44_SERVICE_KEY environment variable not set');
+  }
+
+  const response = await fetch(`https://api.base44.com/v1/apps/${appId}/entities/Integration/${integrationId}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
-      'x-app-id': appId
+      'Authorization': `Bearer ${base44ServiceKey}`
     },
     body: JSON.stringify(data)
   });
@@ -192,6 +198,52 @@ async function updateIntegration(integrationId, appId, apiUrl, data) {
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to update integration: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+// Helper: Create entity in Base44
+async function createEntity(appId, entityName, data) {
+  const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
+  
+  const response = await fetch(`https://api.base44.com/v1/apps/${appId}/entities/${entityName}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${base44ServiceKey}`
+    },
+    body: JSON.stringify(data)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to create ${entityName}: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+// Helper: List entities from Base44
+async function listEntities(appId, entityName, filters = {}) {
+  const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
+  
+  const queryParams = new URLSearchParams();
+  Object.keys(filters).forEach(key => {
+    queryParams.append(key, filters[key]);
+  });
+  
+  const url = `https://api.base44.com/v1/apps/${appId}/entities/${entityName}?${queryParams.toString()}`;
+  
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${base44ServiceKey}`
+    }
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to list ${entityName}: ${response.status} - ${errorText}`);
   }
 
   return response.json();
@@ -238,7 +290,7 @@ async function shopifyGraphQLQuery(query, variables, storeUrl, accessToken, retr
 }
 
 // Sync customers
-async function syncCustomers(storeUrl, accessToken, accountId, integrationId, appId, apiUrl) {
+async function syncCustomers(storeUrl, accessToken, accountId, integrationId, appId) {
   let hasNextPage = true;
   let cursor = null;
   let totalSynced = 0;
@@ -289,7 +341,7 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
   console.log(`Found ${totalCount} customers to sync`);
 
   // Update with total count
-  await updateIntegration(integrationId, appId, apiUrl, {
+  await updateIntegration(integrationId, appId, {
     sync_progress: {
       current_step: 'Syncing customers',
       customers_total: totalCount,
@@ -333,19 +385,12 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
     };
 
     try {
-      await fetch(`${apiUrl}/v1/apps/${appId}/entities/Customer`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-app-id': appId
-        },
-        body: JSON.stringify(customerData)
-      });
-
+      await createEntity(appId, 'Customer', customerData);
       totalSynced++;
 
+      // Update progress every 100 records
       if (totalSynced % 100 === 0 || i === allCustomers.length - 1) {
-        await updateIntegration(integrationId, appId, apiUrl, {
+        await updateIntegration(integrationId, appId, {
           sync_progress: {
             current_step: 'Syncing customers',
             customers_total: totalCount,
@@ -358,6 +403,7 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
       console.error(`Failed to create customer ${shopifyId}:`, error.message);
     }
 
+    // Small delay to avoid overwhelming Base44 API
     if (i % 10 === 0) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
@@ -367,7 +413,7 @@ async function syncCustomers(storeUrl, accessToken, accountId, integrationId, ap
 }
 
 // Sync orders
-async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId, apiUrl) {
+async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId) {
   let hasNextPage = true;
   let cursor = null;
   let totalSynced = 0;
@@ -418,7 +464,7 @@ async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId
   const totalCount = allOrders.length;
   console.log(`Found ${totalCount} orders to sync`);
 
-  await updateIntegration(integrationId, appId, apiUrl, {
+  await updateIntegration(integrationId, appId, {
     sync_progress: {
       current_step: 'Syncing orders',
       orders_total: totalCount,
@@ -458,19 +504,11 @@ async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId
     };
 
     try {
-      await fetch(`${apiUrl}/v1/apps/${appId}/entities/Interaction`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-app-id': appId
-        },
-        body: JSON.stringify(interactionData)
-      });
-
+      await createEntity(appId, 'Interaction', interactionData);
       totalSynced++;
 
       if (totalSynced % 100 === 0 || i === allOrders.length - 1) {
-        await updateIntegration(integrationId, appId, apiUrl, {
+        await updateIntegration(integrationId, appId, {
           sync_progress: {
             current_step: 'Syncing orders',
             orders_total: totalCount,
@@ -492,7 +530,7 @@ async function syncOrders(storeUrl, accessToken, accountId, integrationId, appId
 }
 
 // Sync products
-async function syncProducts(storeUrl, accessToken, accountId, integrationId, appId, apiUrl) {
+async function syncProducts(storeUrl, accessToken, accountId, integrationId, appId) {
   let hasNextPage = true;
   let cursor = null;
   let totalSynced = 0;
@@ -551,7 +589,7 @@ async function syncProducts(storeUrl, accessToken, accountId, integrationId, app
   const totalCount = allProducts.length;
   console.log(`Found ${totalCount} products to sync`);
 
-  await updateIntegration(integrationId, appId, apiUrl, {
+  await updateIntegration(integrationId, appId, {
     sync_progress: {
       current_step: 'Syncing products',
       products_total: totalCount,
@@ -588,19 +626,11 @@ async function syncProducts(storeUrl, accessToken, accountId, integrationId, app
     };
 
     try {
-      await fetch(`${apiUrl}/v1/apps/${appId}/entities/Product`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-app-id': appId
-        },
-        body: JSON.stringify(productData)
-      });
-
+      await createEntity(appId, 'Product', productData);
       totalSynced++;
 
       if (totalSynced % 100 === 0 || i === allProducts.length - 1) {
-        await updateIntegration(integrationId, appId, apiUrl, {
+        await updateIntegration(integrationId, appId, {
           sync_progress: {
             current_step: 'Syncing products',
             products_total: totalCount,
@@ -622,24 +652,18 @@ async function syncProducts(storeUrl, accessToken, accountId, integrationId, app
 }
 
 // Update customer totals
-async function updateCustomerTotals(accountId, integrationId, appId, apiUrl) {
+async function updateCustomerTotals(accountId, integrationId, appId) {
   console.log('Calculating customer totals...');
   
   try {
-    const [customersRes, interactionsRes] = await Promise.all([
-      fetch(`${apiUrl}/v1/apps/${appId}/entities/Customer?account_id=${accountId}&integration_id=${integrationId}&limit=10000`, {
-        headers: { 'x-app-id': appId }
-      }),
-      fetch(`${apiUrl}/v1/apps/${appId}/entities/Interaction?account_id=${accountId}&integration_id=${integrationId}&interaction_type=purchase&limit=10000`, {
-        headers: { 'x-app-id': appId }
-      })
+    const [customers, interactions] = await Promise.all([
+      listEntities(appId, 'Customer', { account_id: accountId, integration_id: integrationId, limit: 10000 }),
+      listEntities(appId, 'Interaction', { account_id: accountId, integration_id: integrationId, interaction_type: 'purchase', limit: 10000 })
     ]);
-
-    const customers = await customersRes.json();
-    const interactions = await interactionsRes.json();
 
     console.log(`Loaded ${customers.length} customers and ${interactions.length} interactions`);
 
+    // Calculate totals per customer
     const customerTotals = {};
     interactions.forEach(interaction => {
       if (interaction.customer_id && interaction.value) {
@@ -647,17 +671,20 @@ async function updateCustomerTotals(accountId, integrationId, appId, apiUrl) {
       }
     });
 
+    // Update each customer
     let updated = 0;
+    const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
+    
     for (const customer of customers) {
       const total = customerTotals[customer.customer_id] || 0;
       
       if (total > 0) {
         try {
-          await fetch(`${apiUrl}/v1/apps/${appId}/entities/Customer/${customer.id}`, {
+          await fetch(`https://api.base44.com/v1/apps/${appId}/entities/Customer/${customer.id}`, {
             method: 'PATCH',
             headers: {
               'Content-Type': 'application/json',
-              'x-app-id': appId
+              'Authorization': `Bearer ${base44ServiceKey}`
             },
             body: JSON.stringify({ total_value: total })
           });
@@ -667,6 +694,7 @@ async function updateCustomerTotals(accountId, integrationId, appId, apiUrl) {
         }
       }
 
+      // Small delay every 10 updates
       if (updated % 10 === 0) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
@@ -681,13 +709,15 @@ async function updateCustomerTotals(accountId, integrationId, appId, apiUrl) {
 }
 
 // Send email via Base44
-async function sendEmail(appId, apiUrl, { to, subject, body }) {
+async function sendEmail(appId, { to, subject, body }) {
   try {
-    await fetch(`${apiUrl}/v1/apps/${appId}/integrations/Core/SendEmail`, {
+    const base44ServiceKey = process.env.BASE44_SERVICE_KEY;
+    
+    await fetch(`https://api.base44.com/v1/apps/${appId}/integrations/Core/SendEmail`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-app-id': appId
+        'Authorization': `Bearer ${base44ServiceKey}`
       },
       body: JSON.stringify({ to, subject, body })
     });
